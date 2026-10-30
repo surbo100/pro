@@ -1,2 +1,2 @@
 @echo off
-start "" "%~dp0photo-check\index.html"
+start "" notepad.exe "%~dp0README.md"

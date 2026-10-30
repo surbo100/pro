@@ -1,12 +1,20 @@
 {
   "manifest_version": 3,
   "name": "포토 업로드 전 확인",
-  "version": "0.2.0",
-  "description": "Google 포토의 비교용 목록을 직접 연결하고 PC의 사진과 업로드 전에 대조합니다.",
-  "permissions": ["scripting"],
-  "host_permissions": ["https://photos.google.com/*"],
-  "background": { "service_worker": "photo-check/background.js" },
-  "action": { "default_title": "포토 업로드 전 확인 열기" },
+  "version": "0.3.0",
+  "description": "PC 사진의 SHA-1을 Google 포토에 직접 조회합니다. 사진 원본 업로드·다운로드 없이 해시로 대조합니다.",
+  "permissions": [
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://photos.google.com/*"
+  ],
+  "background": {
+    "service_worker": "photo-check/background.js"
+  },
+  "action": {
+    "default_title": "포토 업로드 전 확인 열기"
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'"
   }

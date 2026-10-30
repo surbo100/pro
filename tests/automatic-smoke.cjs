@@ -24,12 +24,9 @@ const assert = require('node:assert/strict');
     const account = 'test@example.invalid';
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=', 'base64');
     const files = Array.from({ length: 10 }, (_, i) => ({ name: `사진-${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from(`fixture-${i}`)]) }));
-    const rows = files.slice(0, 6).map((file, i) => {
-      const row = [`media-${i}`, ['https://unused.invalid/thumbnail', 1, 1], 1700000000000,
-        createHash('sha1').update(file.buffer).digest('base64url'), null, 1700000001000, null, [[20]], null, null, null, null, [], false];
-      return row;
-    });
-    let mode = 'complete', requests = 0, secondPageStarted = false;
+    files[1].buffer = files[0].buffer; // renamed byte-identical copy
+    const known = new Set(files.slice(0, 6).map(file => createHash('sha1').update(file.buffer).digest('base64')));
+    let mode = 'complete', requests = 0;
     const requestBodies = [], unexpected = [], pageErrors = [], downloads = [];
     await context.route('https://photos.google.com/**', async route => {
       const request = route.request();
@@ -39,22 +36,19 @@ const assert = require('node:assert/strict');
         return;
       }
       assert.equal(request.method(), 'POST');
-      assert.equal(new URL(request.url()).searchParams.get('rpcids'), 'lcxiM');
+      assert.equal(new URL(request.url()).searchParams.get('rpcids'), 'swbisb');
       assert.equal(new URL(request.url()).searchParams.get('authuser'), '1');
       const params = new URLSearchParams(request.postData());
-      const wrapped = JSON.parse(params.get('f.req'));
-      const payload = JSON.parse(wrapped[0][0][1]);
-      assert.equal(payload[5], 3);
+      const payload = JSON.parse(JSON.parse(params.get('f.req'))[0][0][1]);
+      assert.deepEqual(payload.slice(1), [null, 3, 0]);
+      assert.ok(payload[0].length <= 20);
       requests++;
       requestBodies.push(request.postData());
-      const cursor = payload[0];
-      if (cursor) {
-        secondPageStarted = true;
-        if (mode === 'failure') { await route.fulfill({ status: 403, body: 'synthetic failure' }); return; }
-        if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
-      }
-      const data = cursor ? [rows.slice(3), null, 'timestamp'] : [rows.slice(0, 3), 'page-2', 'timestamp'];
-      await route.fulfill({ contentType: 'text/plain', body: ")]}'\n\n" + JSON.stringify([['wrb.fr', 'lcxiM', JSON.stringify(data)]]) + '\n' });
+      if (mode === 'failure' || (mode === 'batch-failure' && payload[0].length === 5)) { await route.fulfill({ status: 403, body: 'failure' }); return; }
+      if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
+      const rows = payload[0].filter(hash => known.has(hash)).map(hash => [hash, ['media-' + hash, null, null, 'NOT_THE_HASH']]);
+      const data = mode === 'malformed' ? [null] : [rows];
+      await route.fulfill({ contentType: 'text/plain', body: ")]}'\n\n" + JSON.stringify([['wrb.fr', 'swbisb', JSON.stringify(data)]]) + '\n' });
     });
     await context.route(/https?:\/\/(?!photos\.google\.com\/)/, route => { if (route.request().url().startsWith(base + '/')) return route.continue(); unexpected.push(route.request().url()); return route.abort(); });
     const photos = await context.newPage();
@@ -69,7 +63,7 @@ const assert = require('node:assert/strict');
       if (request.op === 'tabs') return [{ id: 101 }];
       assert.equal(request.target.tabId, 101);
       if (request.files) {
-        assert.deepEqual(request.files, ['photo-check/export-google-photos.user.js']);
+        assert.deepEqual(request.files, ['photo-check/hash-reader.js']);
         await photos.addScriptTag({ content: fs.readFileSync(path.join(root, request.files[0]), 'utf8') });
         return [{ frameId: 0 }];
       }
@@ -94,41 +88,46 @@ const assert = require('node:assert/strict');
     await app.locator('#sync-run').click();
     await app.waitForFunction(() => document.getElementById('summary').textContent.includes('일치 6 · 미발견 4'), { timeout: 15000 });
     assert.equal(await app.locator('#results tr').count(), 10);
-    assert.equal(await app.locator('#inventory').inputValue(), '');
-    assert.equal(await app.locator('#account-confirm').isChecked(), true);
-    assert.equal(requests, 2);
-    assert.equal(await photos.locator('#photo-check-export-panel').count(), 0);
-    // A fresh scan must replace the prior complete inventory, even on page failure.
+    assert.equal(requests, 1);
     mode = 'failure';
     await app.locator('#sync-run').click();
-    await app.waitForFunction(() => document.getElementById('summary').textContent.includes('일치 3 · 미발견 0 · 판정 보류 7'));
-    assert.match(await app.locator('#inventory-info').innerText(), /HTTP 403/);
-    // Cancellation after a partial page must not trigger a comparison with old data.
-    mode = 'slow'; secondPageStarted = false;
+    await app.waitForFunction(() => document.getElementById('summary').textContent.includes('일치 0 · 미발견 0 · 오류 10'));
+    mode = 'malformed';
     await app.locator('#sync-run').click();
-    await app.waitForFunction(() => !document.getElementById('cancel').disabled);
-    for (let i = 0; i < 100 && !secondPageStarted; i++) await new Promise(resolve => setTimeout(resolve, 20));
-    assert.equal(secondPageStarted, true);
+    await app.waitForFunction(() => !document.getElementById('sync-run').disabled);
+    assert.match(await app.locator('#summary').innerText(), /오류 10/);
+    mode = 'slow';
+    const beforeSlow = requests;
+    await app.locator('#sync-run').click();
+    for (let i = 0; i < 100 && requests === beforeSlow; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(requests > beforeSlow);
     await app.locator('#cancel').click();
-    await app.waitForFunction(() => document.getElementById('progress').textContent.includes('완료하지 못했습니다'));
+    await app.waitForFunction(() => !document.getElementById('sync-run').disabled);
     assert.equal(await app.locator('#results tr').count(), 0);
-    assert.equal(await app.locator('#run').isDisabled(), true);
-    // Refuse a stale account selection without sending a request under the new account.
     const before = requests;
     await photos.evaluate(() => { window.WIZ_global_data.oPEP7c = 'other@example.invalid'; });
     await app.locator('#sync-run').click();
-    await app.waitForFunction(() => document.getElementById('connection-status').textContent.includes('조회 계정'));
+    await app.waitForFunction(() => !document.getElementById('sync-run').disabled);
     assert.equal(requests, before);
-    assert.equal(await app.locator('#results tr').count(), 0);
+    assert.match(await app.locator('#summary').innerText(), /일치 0 · 미발견 0 · 오류 10/);
+    await photos.evaluate(() => { window.WIZ_global_data.oPEP7c = 'test@example.invalid'; });
+    const many = Array.from({ length: 25 }, (_, i) => ({ name: `batch-${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from(`batch-${i}`)]) }));
+    mode = 'batch-failure';
+    const beforeBatch = requests;
+    await app.locator('#photos').setInputFiles(many);
+    await app.locator('#sync-run').click();
+    await app.waitForFunction(() => !document.getElementById('sync-run').disabled);
+    assert.equal(requests - beforeBatch, 2);
+    assert.match(await app.locator('#summary').innerText(), /일치 0 · 미발견 20 · 오류 5/);
     assert.deepEqual(downloads, []);
     assert.deepEqual(unexpected, []);
     assert.deepEqual(pageErrors, []);
-    // Only cursors and session fields go to the mocked Google endpoint, never local file hashes/names/bytes.
+    // Hashes are intentionally sent; local bytes and file names are not.
     for (const file of files) for (const body of requestBodies) {
-      assert.ok(!body.includes(file.name));
-      assert.ok(!body.includes(createHash('sha1').update(file.buffer).digest('base64url')));
+      assert.ok(!decodeURIComponent(body).includes(file.name));
+      assert.ok(!body.includes(file.buffer.toString('base64')));
     }
-    console.log('PASS: simulated extension transport + real app/bridge/reader + mocked Google pages, account selection, 2-page automatic transfer, 10-file comparison, partial failure, cancellation, changed-account refusal, zero JSON downloads, no local photo data sent.');
+    console.log('PASS: direct web hash query, 10 files including renamed duplicate, hash mapping, 403, malformed response, cancellation, changed account, no photo transfer.');
   } finally {
     await context?.close();
     await browser?.close();

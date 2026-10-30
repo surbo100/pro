@@ -27,55 +27,29 @@
     return choices;
   }
 
-  async function read(tabId, expectedAccount, onProgress = () => {}) {
-    if (!available()) throw new Error('자동 연결은 Chrome·Edge 확장으로 연 화면에서 사용할 수 있습니다.');
-    if (!Number.isInteger(tabId) || !expectedAccount) throw new Error('로그인한 포토 탭과 계정을 선택하세요.');
-    if (activeTabId !== null) throw new Error('이미 포토 목록을 조회하고 있습니다.');
+  async function query(tabId, expectedAccount, hashes) {
+    if (!available()) throw new Error('Chrome·Edge 확장에서 열어 주세요.');
+    if (!Number.isInteger(tabId) || !expectedAccount || activeTabId !== null) throw new Error('조회할 포토 계정을 확인하세요.');
     activeTabId = tabId; activeJobId = crypto.randomUUID(); cancelRequested = false;
-    const jobId = activeJobId;
-    let timer;
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId }, world: 'MAIN',
-        func: () => { window.__photoCheckBridgeLoad = true; },
-      });
-      await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', files: ['photo-check/export-google-photos.user.js'] });
-      if (cancelRequested) throw new Error('사용자가 조회를 중단했습니다.');
-      let polling = false;
-      timer = setInterval(async () => {
-        if (polling) return;
-        polling = true;
-        try {
-          const state = resultOf(await chrome.scripting.executeScript({
-            target: { tabId }, world: 'MAIN', func: () => window.__photoCheckReader?.progress || {},
-          }));
-          if (activeJobId === jobId && state.jobId === jobId) onProgress(state);
-        } catch { /* The main request reports a closed/navigated tab as an error. */ }
-        finally { polling = false; }
-      }, 700);
+      await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', files: ['photo-check/hash-reader.js'] });
+      if (cancelRequested) throw new Error('조회가 중단되었습니다.');
       const response = resultOf(await chrome.scripting.executeScript({
-        target: { tabId }, world: 'MAIN', args: [expectedAccount, jobId],
-        func: async (account, id) => {
-          try { return { inventory: await window.__photoCheckReader.readInventory(account, id) }; }
-          catch { return { error: '조회 계정이 변경되었거나 포토 조회를 시작하지 못했습니다.' }; }
+        target: { tabId }, world: 'MAIN', args: [expectedAccount, activeJobId, hashes],
+        func: async (account, id, values) => {
+          try { return { value: await window.__photoCheckHashReader.query(account, id, values) }; }
+          catch { return { error: '조회 실패: 로그인·계정 변경·응답 형식·연결 상태를 확인하세요. 미백업으로 판정하지 않습니다.' }; }
         },
       }));
+      if (cancelRequested) throw new Error('조회가 중단되었습니다.');
       if (response.error) throw new Error(response.error);
-      if (cancelRequested) throw new Error('사용자가 조회를 중단했습니다. 이전 목록으로 검사하지 않습니다.');
-      const value = response.inventory;
-      if (value?.schema !== 'photo-check-inventory-v1' || value.account !== expectedAccount) {
-        throw new Error('선택한 계정과 조회 결과가 다릅니다. 목록을 적용하지 않았습니다.');
+      const value = response.value;
+      if (value?.schema !== 'photo-check-hashes-v1' || value.account !== expectedAccount ||
+          JSON.stringify(value.hashes) !== JSON.stringify(hashes) || !Array.isArray(value.matches)) {
+        throw new Error('조회 계정 또는 응답이 요청과 다릅니다.');
       }
       return value;
-    } catch (error) {
-      if (cancelRequested) throw new Error('사용자가 조회를 중단했습니다.');
-      if (error.message.startsWith('선택한') || error.message.startsWith('조회 계정')) throw error;
-      throw new Error('포토 탭 연결이 끊겼거나 조회하지 못했습니다. 탭을 유지하고 로그인·확장 권한을 확인하세요.');
-    } finally {
-      clearInterval(timer);
-      activeTabId = null;
-      activeJobId = null;
-    }
+    } finally { activeTabId = null; activeJobId = null; }
   }
 
   async function cancel() {
@@ -83,9 +57,9 @@
     if (activeTabId === null) return;
     try {
       await chrome.scripting.executeScript({ target: { tabId: activeTabId }, world: 'MAIN', args: [activeJobId],
-        func: id => { window.__photoCheckReader?.cancel(id); } });
+        func: id => { window.__photoCheckHashReader?.cancel(id); } });
     } catch { /* A closed tab has already stopped its reader. */ }
   }
 
-  root.PhotoCheckBridge = { available, listTabs, read, cancel };
+  root.PhotoCheckBridge = { available, listTabs, query, cancel };
 })(globalThis);
